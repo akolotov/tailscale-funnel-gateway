@@ -1,0 +1,40 @@
+services:
+  tailscale:
+    image: tailscale/tailscale:stable
+    container_name: tailscale-gateway
+    hostname: ${TS_HOSTNAME:-apps-gateway}
+    restart: unless-stopped
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      # When state is persisted, authenticate only a previously unregistered node.
+      TS_AUTH_ONCE: "true"
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_HOSTNAME: ${TS_HOSTNAME:-apps-gateway}
+      TS_USERSPACE: "true"
+    volumes:
+      - ./state:/var/lib/tailscale
+    networks:
+      - tailscale-ingress
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - tailscale status --peers=false >/dev/null 2>&1 && tailscale ip -4 >/dev/null 2>&1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  proxy:
+    image: nginx:1.27-alpine
+    container_name: tailscale-gateway-proxy
+    restart: unless-stopped
+    network_mode: "service:tailscale"
+    depends_on:
+      tailscale:
+        condition: service_started
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+networks:
+  tailscale-ingress:
+    name: tailscale-ingress

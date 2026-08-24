@@ -1,0 +1,14 @@
+services:
+  web:
+    image: traefik/whoami:v1.11
+    command: ["--port", "8080", "--name", "apps-example"]
+    restart: unless-stopped
+    networks:
+      tailscale-ingress:
+        aliases:
+          - apps-example
+
+networks:
+  tailscale-ingress:
+    external: true
+    name: tailscale-ingress
