@@ -38,8 +38,8 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
 
   watchdog:
-    build:
-      context: ./watchdog
+    image: ${WATCHDOG_IMAGE:-ghcr.io/akolotov/tailscale-funnel-watchdog:main}
+    pull_policy: always
     container_name: tailscale-funnel-watchdog
     restart: unless-stopped
     network_mode: "service:tailscale"

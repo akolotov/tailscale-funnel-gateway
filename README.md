@@ -133,6 +133,18 @@ The watchdog talks to `tailscaled` through a shared LocalAPI socket. It does
 not receive the Docker socket, cannot delete `state/`, and does not restart
 application containers.
 
+Compose pulls the watchdog from
+`ghcr.io/akolotov/tailscale-funnel-watchdog:main` by default and does not build
+it locally. Set `WATCHDOG_IMAGE` in `.env` to deploy a release or immutable
+image instead, for example:
+
+```dotenv
+WATCHDOG_IMAGE=ghcr.io/akolotov/tailscale-funnel-watchdog:1.2.3
+```
+
+The `pull_policy: always` setting makes `docker compose up` check the registry
+for the configured image even when an older copy is cached locally.
+
 Run one non-mutating diagnostic check:
 
 ```bash
