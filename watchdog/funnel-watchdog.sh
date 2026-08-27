@@ -29,6 +29,8 @@ PROBE_PENDING=false
 PROBE_REASON=unknown
 FUNNEL_FQDN=
 DNS_IPS=
+RECOVERY_LOCK_HELD=false
+RECOVERY_ATTEMPT_ACTIVE=false
 
 log() {
   printf '%s funnel-watchdog %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -221,6 +223,7 @@ acquire_recovery_lock() {
   now=$(date +%s)
   if mkdir "$RECOVERY_LOCK_DIR" 2>/dev/null; then
     printf '%s\n' "$now" > "$RECOVERY_LOCK_DIR/created-at"
+    RECOVERY_LOCK_HELD=true
     return 0
   fi
 
@@ -234,17 +237,49 @@ acquire_recovery_lock() {
   rmdir "$RECOVERY_LOCK_DIR" 2>/dev/null || return 1
   mkdir "$RECOVERY_LOCK_DIR" 2>/dev/null || return 1
   printf '%s\n' "$now" > "$RECOVERY_LOCK_DIR/created-at"
+  RECOVERY_LOCK_HELD=true
+  rm -f "$LAST_RECOVERY_FILE"
+  log "level=warn event=stale_recovery_lock_reclaimed"
 }
 
 release_recovery_lock() {
   rm -f "$RECOVERY_LOCK_DIR/created-at"
   rmdir "$RECOVERY_LOCK_DIR" 2>/dev/null || true
+  RECOVERY_LOCK_HELD=false
 }
+
+abort_recovery() {
+  rm -f "$LAST_RECOVERY_FILE"
+  RECOVERY_ATTEMPT_ACTIVE=false
+  release_recovery_lock
+}
+
+finish_recovery() {
+  RECOVERY_ATTEMPT_ACTIVE=false
+  release_recovery_lock
+}
+
+handle_signal() {
+  signal_name=$1
+  exit_code=$2
+  trap - HUP INT TERM
+  if [ "$RECOVERY_ATTEMPT_ACTIVE" = true ]; then
+    log "level=warn event=recovery_interrupted signal=$signal_name"
+    abort_recovery
+  elif [ "$RECOVERY_LOCK_HELD" = true ]; then
+    release_recovery_lock
+  fi
+  exit "$exit_code"
+}
+
+trap 'handle_signal HUP 129' HUP
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
 
 enable_funnel() {
   attempt=1
   while [ "$attempt" -le 3 ]; do
-    if tailscale_cli funnel --bg "$FUNNEL_TARGET" >/dev/null; then
+    if tailscale_cli funnel --https="$FUNNEL_PORT" --bg "$FUNNEL_TARGET" >/dev/null; then
       return 0
     fi
     log "level=error event=recovery_command_failed command=on attempt=$attempt"
@@ -291,39 +326,37 @@ recover() {
     return 1
   fi
 
+  RECOVERY_ATTEMPT_ACTIVE=true
   printf '%s\n' "$(date +%s)" > "$LAST_RECOVERY_FILE"
   log "level=warn event=recovery_started failure=$PROBE_REASON action=reapply"
   if ! enable_funnel; then
     log "level=error event=recovery_failed stage=reapply"
-    rm -f "$LAST_RECOVERY_FILE"
-    release_recovery_lock
+    abort_recovery
     return 1
   fi
   if wait_for_recovery "$SOFT_RECOVERY_WAIT_SECONDS" reapply; then
-    release_recovery_lock
+    finish_recovery
     return 0
   fi
 
   log "level=warn event=recovery_started failure=$PROBE_REASON action=off_on"
   if ! tailscale_cli funnel --https="$FUNNEL_PORT" off >/dev/null; then
     log "level=error event=recovery_failed stage=off"
-    rm -f "$LAST_RECOVERY_FILE"
-    release_recovery_lock
+    abort_recovery
     return 1
   fi
   if ! enable_funnel; then
     log "level=error event=recovery_failed stage=on"
-    rm -f "$LAST_RECOVERY_FILE"
-    release_recovery_lock
+    abort_recovery
     return 1
   fi
   if wait_for_recovery "$RECOVERY_WAIT_SECONDS" off_on; then
-    release_recovery_lock
+    finish_recovery
     return 0
   fi
 
   log "level=error event=recovery_exhausted reason=$PROBE_REASON"
-  release_recovery_lock
+  finish_recovery
   return 1
 }
 
