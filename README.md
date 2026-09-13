@@ -162,6 +162,14 @@ disabling automatic changes. Timing and resolver settings are documented in
 `.env.example` and can be overridden with the corresponding `WATCHDOG_*`
 variables in `docker-compose.yml`.
 
+To receive incident and recovery notifications in a private Telegram chat,
+start a conversation with a bot and set both `WATCHDOG_BOT_TOKEN` and
+`WATCHDOG_NOTIFICATION_CHAT_ID` in `.env`. During continuous monitoring, the
+first notification is sent after the configured consecutive-failure threshold
+is reached; recovery transitions are deduplicated for the lifetime of the
+incident. Telegram delivery is best-effort and never prevents health checks or
+automatic recovery.
+
 ### Published watchdog image
 
 GitHub Actions publishes a multi-platform watchdog image for `linux/amd64` and
