@@ -139,7 +139,7 @@ open_incident() {
   rm -f "$INCIDENT_EVENTS_FILE"
   incident_gateway=$(notification_gateway)
   notify_incident_event detected \
-    "$(printf 'Funnel watchdog: incident detected\nGateway: %s\nReason: %s\nConsecutive failures: %s' \
+    "$(printf '🚨 Funnel watchdog: incident detected\nGateway: %s\nReason: %s\nConsecutive failures: %s' \
       "$incident_gateway" "$PROBE_REASON" "$FAILURE_THRESHOLD")"
 }
 
@@ -157,7 +157,7 @@ close_incident() {
   rm -f "$INCIDENT_FILE"
   rm -f "$INCIDENT_EVENTS_FILE"
   incident_gateway=$(notification_gateway)
-  notify_telegram "$(printf 'Funnel watchdog: recovered\nGateway: %s\nOriginal reason: %s\nResolution: %s\nDuration: %s seconds' \
+  notify_telegram "$(printf '✅ Funnel watchdog: recovered\nGateway: %s\nOriginal reason: %s\nResolution: %s\nDuration: %s seconds' \
     "$incident_gateway" "${incident_original_reason:-unknown}" "$incident_resolution" "$incident_duration")"
 }
 
@@ -356,7 +356,7 @@ handle_signal() {
   if [ "$RECOVERY_ATTEMPT_ACTIVE" = true ]; then
     log "level=warn event=recovery_interrupted signal=$signal_name"
     notify_incident_event recovery_interrupted \
-      "$(printf 'Funnel watchdog: recovery interrupted\nGateway: %s\nSignal: %s' \
+      "$(printf '⚠️ Funnel watchdog: recovery interrupted\nGateway: %s\nSignal: %s' \
         "$(notification_gateway)" "$signal_name")"
     abort_recovery
   elif [ "$RECOVERY_LOCK_HELD" = true ]; then
@@ -424,12 +424,12 @@ recover() {
   printf '%s\n' "$(date +%s)" > "$LAST_RECOVERY_FILE"
   log "level=warn event=recovery_started failure=$PROBE_REASON action=reapply"
   notify_incident_event recovery_started \
-    "$(printf 'Funnel watchdog: automatic recovery started\nGateway: %s\nReason: %s\nAction: reapply' \
+    "$(printf '🔧 Funnel watchdog: automatic recovery started\nGateway: %s\nReason: %s\nAction: reapply' \
       "$(notification_gateway)" "$PROBE_REASON")"
   if ! enable_funnel; then
     log "level=error event=recovery_failed stage=reapply"
     notify_incident_event recovery_failed \
-      "$(printf 'Funnel watchdog: recovery failed\nGateway: %s\nStage: reapply' \
+      "$(printf '❌ Funnel watchdog: recovery failed\nGateway: %s\nStage: reapply' \
         "$(notification_gateway)")"
     abort_recovery
     return 1
@@ -441,12 +441,12 @@ recover() {
 
   log "level=warn event=recovery_started failure=$PROBE_REASON action=off_on"
   notify_incident_event recovery_escalated \
-    "$(printf 'Funnel watchdog: recovery escalated\nGateway: %s\nAction: Funnel off/on' \
+    "$(printf '🔄 Funnel watchdog: recovery escalated\nGateway: %s\nAction: Funnel off/on' \
       "$(notification_gateway)")"
   if ! tailscale_cli funnel --https="$FUNNEL_PORT" off >/dev/null; then
     log "level=error event=recovery_failed stage=off"
     notify_incident_event recovery_failed \
-      "$(printf 'Funnel watchdog: recovery failed\nGateway: %s\nStage: off' \
+      "$(printf '❌ Funnel watchdog: recovery failed\nGateway: %s\nStage: off' \
         "$(notification_gateway)")"
     abort_recovery
     return 1
@@ -454,7 +454,7 @@ recover() {
   if ! enable_funnel; then
     log "level=error event=recovery_failed stage=on"
     notify_incident_event recovery_failed \
-      "$(printf 'Funnel watchdog: recovery failed\nGateway: %s\nStage: on' \
+      "$(printf '❌ Funnel watchdog: recovery failed\nGateway: %s\nStage: on' \
         "$(notification_gateway)")"
     abort_recovery
     return 1
@@ -466,7 +466,7 @@ recover() {
 
   log "level=error event=recovery_exhausted reason=$PROBE_REASON"
   notify_incident_event recovery_exhausted \
-    "$(printf 'Funnel watchdog: recovery exhausted\nGateway: %s\nReason: %s' \
+    "$(printf '❌ Funnel watchdog: recovery exhausted\nGateway: %s\nReason: %s' \
       "$(notification_gateway)" "$PROBE_REASON")"
   finish_recovery
   return 1
