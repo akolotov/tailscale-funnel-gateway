@@ -16,10 +16,15 @@ PUBLIC_PATH=${WATCHDOG_PUBLIC_PATH:-/healthz}
 FUNNEL_TARGET=${WATCHDOG_FUNNEL_TARGET:-http://127.0.0.1:8080}
 FUNNEL_PORT=${WATCHDOG_FUNNEL_PORT:-443}
 COMMAND_TIMEOUT_SECONDS=${WATCHDOG_COMMAND_TIMEOUT_SECONDS:-15}
+BOT_TOKEN=${WATCHDOG_BOT_TOKEN:-}
+NOTIFICATION_CHAT_ID=${WATCHDOG_NOTIFICATION_CHAT_ID:-}
+NOTIFICATION_TIMEOUT_SECONDS=${WATCHDOG_NOTIFICATION_TIMEOUT_SECONDS:-5}
 STATE_DIR=${WATCHDOG_STATE_DIR:-/var/lib/funnel-watchdog}
 LAST_RECOVERY_FILE="$STATE_DIR/last-recovery"
 LAST_SUCCESS_FILE="$STATE_DIR/last-success"
 FUNNEL_MANAGED_FILE="$STATE_DIR/funnel-managed"
+INCIDENT_FILE="$STATE_DIR/incident"
+INCIDENT_EVENTS_FILE="$STATE_DIR/incident-events"
 RECOVERY_LOCK_DIR="$STATE_DIR/recovery.lock"
 
 TS_OK=false
@@ -31,6 +36,7 @@ FUNNEL_FQDN=
 DNS_IPS=
 RECOVERY_LOCK_HELD=false
 RECOVERY_ATTEMPT_ACTIVE=false
+NOTIFICATIONS_ENABLED=false
 
 log() {
   printf '%s funnel-watchdog %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -52,13 +58,15 @@ validate_config() {
   for value in "$INTERVAL_SECONDS" "$FAILURE_THRESHOLD" \
     "$RECOVERY_COOLDOWN_SECONDS" "$SOFT_RECOVERY_WAIT_SECONDS" \
     "$RECOVERY_WAIT_SECONDS" "$RECOVERY_POLL_SECONDS" \
-    "$FUNNEL_PORT" "$COMMAND_TIMEOUT_SECONDS"; do
+    "$FUNNEL_PORT" "$COMMAND_TIMEOUT_SECONDS" \
+    "$NOTIFICATION_TIMEOUT_SECONDS"; do
     is_uint "$value" || die "invalid_numeric_configuration value=$value"
   done
 
   [ "$FAILURE_THRESHOLD" -gt 0 ] || die "failure_threshold_must_be_positive"
   [ "$INTERVAL_SECONDS" -gt 0 ] || die "interval_must_be_positive"
   [ "$RECOVERY_POLL_SECONDS" -gt 0 ] || die "recovery_poll_must_be_positive"
+  [ "$NOTIFICATION_TIMEOUT_SECONDS" -gt 0 ] || die "notification_timeout_must_be_positive"
   case "$RECOVERY_ENABLED" in
     true|false) ;;
     *) die "WATCHDOG_RECOVERY_ENABLED_must_be_true_or_false" ;;
@@ -69,6 +77,88 @@ validate_config() {
   esac
   [ -n "$DNS_RESOLVERS" ] || die "WATCHDOG_DNS_RESOLVERS_must_not_be_empty"
   mkdir -p "$STATE_DIR" || die "cannot_create_state_directory path=$STATE_DIR"
+
+  if [ -n "$BOT_TOKEN" ] && [ -n "$NOTIFICATION_CHAT_ID" ]; then
+    NOTIFICATIONS_ENABLED=true
+  elif [ -n "$BOT_TOKEN" ] || [ -n "$NOTIFICATION_CHAT_ID" ]; then
+    log "level=warn event=notifications_disabled provider=telegram reason=incomplete_configuration"
+  fi
+}
+
+notification_gateway() {
+  if [ -n "$FUNNEL_FQDN" ]; then
+    printf '%s' "$FUNNEL_FQDN"
+  else
+    hostname 2>/dev/null || printf '%s' unknown
+  fi
+}
+
+notify_telegram() {
+  [ "$NOTIFICATIONS_ENABLED" = true ] || return 0
+
+  notification_text=$1
+  if curl --fail --silent --show-error \
+    --connect-timeout "$NOTIFICATION_TIMEOUT_SECONDS" \
+    --max-time "$NOTIFICATION_TIMEOUT_SECONDS" \
+    --request POST \
+    --data-urlencode "chat_id=$NOTIFICATION_CHAT_ID" \
+    --data-urlencode "text=$notification_text" \
+    "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" >/dev/null 2>&1; then
+    log "level=info event=notification_sent provider=telegram"
+  else
+    # Notification delivery must never interrupt health checks or recovery.
+    log "level=warn event=notification_failed provider=telegram"
+  fi
+  return 0
+}
+
+notify_incident_event() {
+  incident_event=$1
+  incident_message=$2
+  [ "$NOTIFICATIONS_ENABLED" = true ] || return 0
+  if [ -f "$INCIDENT_EVENTS_FILE" ] && \
+    grep -F -x "$incident_event" "$INCIDENT_EVENTS_FILE" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  printf '%s\n' "$incident_event" >> "$INCIDENT_EVENTS_FILE" || {
+    log "level=warn event=incident_event_state_write_failed notification=$incident_event"
+    return 0
+  }
+  notify_telegram "$incident_message"
+}
+
+open_incident() {
+  [ -f "$INCIDENT_FILE" ] && return 0
+
+  incident_started=$(date +%s)
+  printf '%s\n%s\n' "$incident_started" "$PROBE_REASON" > "$INCIDENT_FILE" || {
+    log "level=warn event=incident_state_write_failed"
+    return 0
+  }
+  rm -f "$INCIDENT_EVENTS_FILE"
+  incident_gateway=$(notification_gateway)
+  notify_incident_event detected \
+    "$(printf '🚨 Funnel watchdog: incident detected\nGateway: %s\nReason: %s\nConsecutive failures: %s' \
+      "$incident_gateway" "$PROBE_REASON" "$FAILURE_THRESHOLD")"
+}
+
+close_incident() {
+  incident_resolution=$1
+  [ -f "$INCIDENT_FILE" ] || return 0
+
+  incident_started=$(sed -n '1p' "$INCIDENT_FILE" 2>/dev/null)
+  incident_original_reason=$(sed -n '2p' "$INCIDENT_FILE" 2>/dev/null)
+  incident_duration=unknown
+  if is_uint "$incident_started"; then
+    incident_now=$(date +%s)
+    incident_duration=$((incident_now - incident_started))
+  fi
+  rm -f "$INCIDENT_FILE"
+  rm -f "$INCIDENT_EVENTS_FILE"
+  incident_gateway=$(notification_gateway)
+  notify_telegram "$(printf '✅ Funnel watchdog: recovered\nGateway: %s\nOriginal reason: %s\nResolution: %s\nDuration: %s seconds' \
+    "$incident_gateway" "${incident_original_reason:-unknown}" "$incident_resolution" "$incident_duration")"
 }
 
 tailscale_cli() {
@@ -265,6 +355,9 @@ handle_signal() {
   trap - HUP INT TERM
   if [ "$RECOVERY_ATTEMPT_ACTIVE" = true ]; then
     log "level=warn event=recovery_interrupted signal=$signal_name"
+    notify_incident_event recovery_interrupted \
+      "$(printf '⚠️ Funnel watchdog: recovery interrupted\nGateway: %s\nSignal: %s' \
+        "$(notification_gateway)" "$signal_name")"
     abort_recovery
   elif [ "$RECOVERY_LOCK_HELD" = true ]; then
     release_recovery_lock
@@ -300,6 +393,7 @@ wait_for_recovery() {
     elapsed=$((elapsed + sleep_for))
     if probe; then
       log "level=info event=recovered stage=$2 elapsed_seconds=$elapsed fqdn=$FUNNEL_FQDN"
+      close_incident "automatic recovery ($2)"
       return 0
     fi
     log "level=warn event=recovery_wait stage=$2 elapsed_seconds=$elapsed reason=$PROBE_REASON"
@@ -329,8 +423,14 @@ recover() {
   RECOVERY_ATTEMPT_ACTIVE=true
   printf '%s\n' "$(date +%s)" > "$LAST_RECOVERY_FILE"
   log "level=warn event=recovery_started failure=$PROBE_REASON action=reapply"
+  notify_incident_event recovery_started \
+    "$(printf '🔧 Funnel watchdog: automatic recovery started\nGateway: %s\nReason: %s\nAction: reapply' \
+      "$(notification_gateway)" "$PROBE_REASON")"
   if ! enable_funnel; then
     log "level=error event=recovery_failed stage=reapply"
+    notify_incident_event recovery_failed \
+      "$(printf '❌ Funnel watchdog: recovery failed\nGateway: %s\nStage: reapply' \
+        "$(notification_gateway)")"
     abort_recovery
     return 1
   fi
@@ -340,13 +440,22 @@ recover() {
   fi
 
   log "level=warn event=recovery_started failure=$PROBE_REASON action=off_on"
+  notify_incident_event recovery_escalated \
+    "$(printf '🔄 Funnel watchdog: recovery escalated\nGateway: %s\nAction: Funnel off/on' \
+      "$(notification_gateway)")"
   if ! tailscale_cli funnel --https="$FUNNEL_PORT" off >/dev/null; then
     log "level=error event=recovery_failed stage=off"
+    notify_incident_event recovery_failed \
+      "$(printf '❌ Funnel watchdog: recovery failed\nGateway: %s\nStage: off' \
+        "$(notification_gateway)")"
     abort_recovery
     return 1
   fi
   if ! enable_funnel; then
     log "level=error event=recovery_failed stage=on"
+    notify_incident_event recovery_failed \
+      "$(printf '❌ Funnel watchdog: recovery failed\nGateway: %s\nStage: on' \
+        "$(notification_gateway)")"
     abort_recovery
     return 1
   fi
@@ -356,6 +465,9 @@ recover() {
   fi
 
   log "level=error event=recovery_exhausted reason=$PROBE_REASON"
+  notify_incident_event recovery_exhausted \
+    "$(printf '❌ Funnel watchdog: recovery exhausted\nGateway: %s\nReason: %s' \
+      "$(notification_gateway)" "$PROBE_REASON")"
   finish_recovery
   return 1
 }
@@ -370,6 +482,7 @@ run_once() {
     return 0
   fi
   log "level=warn check=complete status=unhealthy reason=$PROBE_REASON"
+  open_incident
   recover
 }
 
@@ -381,6 +494,7 @@ run_loop() {
       if [ "$failures" -gt 0 ] || [ "$last_reason" = awaiting_initial_funnel_configuration ]; then
         log "level=info check=complete status=healthy previous_failures=$failures previous_state=${last_reason:-none} fqdn=$FUNNEL_FQDN"
       fi
+      close_incident "health check passed"
       failures=0
       last_reason=healthy
     elif [ "$PROBE_PENDING" = true ]; then
@@ -393,6 +507,7 @@ run_loop() {
       failures=$((failures + 1))
       log "level=warn check=complete status=unhealthy reason=$PROBE_REASON consecutive_failures=$failures threshold=$FAILURE_THRESHOLD"
       if [ "$failures" -ge "$FAILURE_THRESHOLD" ]; then
+        open_incident
         recover || true
         failures=0
       fi

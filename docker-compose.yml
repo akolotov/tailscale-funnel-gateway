@@ -61,6 +61,8 @@ services:
       WATCHDOG_PUBLIC_PATH: ${WATCHDOG_PUBLIC_PATH:-/healthz}
       WATCHDOG_FUNNEL_TARGET: ${WATCHDOG_FUNNEL_TARGET:-http://127.0.0.1:8080}
       WATCHDOG_FUNNEL_PORT: ${WATCHDOG_FUNNEL_PORT:-443}
+      WATCHDOG_BOT_TOKEN: ${WATCHDOG_BOT_TOKEN:-}
+      WATCHDOG_NOTIFICATION_CHAT_ID: ${WATCHDOG_NOTIFICATION_CHAT_ID:-}
     volumes:
       - tailscale-socket:/var/run/tailscale:ro
       - watchdog-data:/var/lib/funnel-watchdog
