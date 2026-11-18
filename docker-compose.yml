@@ -27,7 +27,7 @@ services:
       start_period: 10s
 
   proxy:
-    image: nginx:1.27-alpine
+    image: nginx:1.31.9-alpine
     container_name: tailscale-gateway-proxy
     restart: unless-stopped
     network_mode: "service:tailscale"
